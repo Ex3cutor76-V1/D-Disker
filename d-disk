@@ -1,0 +1,129 @@
+#!/usr/bin/env bash
+
+# Variáveis importantes
+FLAG=$1
+argument1=$2
+argument2=$3
+
+# Cores
+AMARELO=$'\033[33m'
+VERMELHO=$'\033[31m'
+RESET=$'\033[0m'
+
+case "$FLAG" in
+
+# Opção de ajuda
+-h|--help)
+cat << 'EOF'
+
+D-Disker - Um canivete suíço para manipulação de disco rígido.
+
+Sintaxe:
+
+d-disk <flag> <disco> <argumento>
+
+obs: O argumento pode ser tanto /dev/sdX quanto um arquivo iso
+
+Flags auxiliares:
+--help, -h     Ajuda
+
+Flags de ação:
+--boot, -b     Criar pen drive bootável
+--format, -f     Formata disco
+--clear, -c      "Zerar" o disco
+
+Flag de informação do disco:
+--info, -i       Informações do disco
+EOF
+;;
+
+# Opção de escrever iso em um disco (Ou mais conhecido como "Pendrive Bootável")
+--boot|-b)
+    printf "${AMARELO}Desmontando disco...${RESET}\n"
+
+    while read -r mountpoint; do
+        if [[ -n "$mountpoint" ]]; then
+            sudo umount "$mountpoint"
+        fi
+    done < <(lsblk -nr -o MOUNTPOINT "$argument1" | awk 'NF')
+
+    printf "${AMARELO}Inserindo iso no disco selecionado...${RESET}\n"
+    sudo dd if="$argument2" of="$argument1" conv=fsync bs=4M status=progress
+    sync
+;;
+
+# Opção de formatação de disco com suporte a FAT32, EXT4, NTFS
+--format|-f)
+printf "${AMARELO}Iniciando formatação de disco...${RESET}\n"
+case "$argument2" in
+
+ext4)
+sudo mkfs.ext4 "$argument1" # Formata disco selecionado para EXT4
+;;
+
+fat32)
+sudo mkfs.fat -F 32 "$argument1" # Formata disco para FAT32
+;;
+
+ntfs)
+sudo mkfs.ntfs "$argument1" # Formata disco para NTFS
+;;
+
+*)
+printf "${VERMELHO}Filesystem inválido.${RESET}\n"
+;;
+esac
+
+;;
+
+# Opção de "zerar" o HD, cujo a ideia é simplesmente, destruir todo o conteúdo existente no disco, podendo apagar
+# O sistema operacional, partições e até mesmo arquivos existentes presentes no disco.
+--clear|-c)
+printf "${VERMELHO}AVISO URGENTE${RESET}\n"
+echo "Você tem certeza dessa decisão?"
+echo "Essa opção pode apagar o disco (Ou a partição) INTEIRO e todo o conteúdo será perdido."
+echo "Caso tenha certeza use: s ou n"
+read -p " " resp
+resp=${resp,,}
+
+if [[ "$resp" == "s" ]]; then
+printf "${AMARELO}Apagando tudo do disco selecionado...${RESET}\n"
+sudo dd if=/dev/zero of="$argument1" bs=4M status=progress conv=fsync
+sync
+else
+exit
+fi
+;;
+
+# Opção de exibir informações do disco
+--info|-i)
+printf "${AMARELO}Coletando informações sobre o disco selecionado...${RESET}\n"
+sleep 1
+# Variáveis para a coleta de informações do disco
+capacidade=$(lsblk -dn -o SIZE "$argument1")
+filesys=$(lsblk -n -o FSTYPE "$argument1" | awk 'NF {print; exit}')
+particao=$(lsblk -o NAME,SIZE,FSTYPE,MOUNTPOINT "$argument1")
+signature=$(sudo wipefs "$argument1" | awk 'NR > 1 {print $3}')
+open_espace=$(df -h "$argument1" | awk 'NR==2 {print $4}')
+model=$(lsblk -o MODEL "$argument1" | awk 'NF && $0 != "MODEL"')
+fabricante=$(lsblk -o VENDOR "$argument1" | awk 'NR > 1 && NF')
+
+# Exibindo informações na tela
+echo "Disco escolhido: $argument1"
+echo "Capacidade de armazenamento: $capacidade "
+echo "Espaço livre: $open_espace"
+echo "Formatação de filesystem: $filesys"
+echo "================================PARTIÇÕES============================"
+echo "$particao"
+echo "====================================================================="
+echo "Assintura: $signature"
+echo "Modelo: $model"
+echo "Fabricante: $fabricante"
+;;
+
+*)
+printf "${VERMELHO}Comando inválido! Use:${RESET} d-disk -h\n"
+;;
+
+esac
+
