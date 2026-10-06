@@ -110,4 +110,8 @@ ou
 ```bash
 d-disk -i /dev/sdX
 ```
+## Como instalar o D-Disker
+
+```bash
+git clone 
 
