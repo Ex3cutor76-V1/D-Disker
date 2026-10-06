@@ -113,5 +113,7 @@ d-disk -i /dev/sdX
 ## Como instalar o D-Disker
 
 ```bash
-git clone 
-
+git clone https://github.com/Ex3cutor76-V1/D-Disker.git
+cd D-Disker
+sudo ./install.sh
+```
