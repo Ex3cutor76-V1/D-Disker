@@ -17,6 +17,7 @@ DEPENDENCIAS=(bash
     e2fsprogs
     dosfstools
     ntfs-3g
+    cryptsetup
     sudo
 )
 PASTE="/usr/local/bin/"

@@ -7,8 +7,135 @@ argument2=$3
 
 # Cores
 AMARELO=$'\033[33m'
+VERDE=$'\033[32m'
 VERMELHO=$'\033[31m'
 RESET=$'\033[0m'
+
+# Variáveis para não repetição
+mensagem1="${AMARELO}Verificando existência do disco...${RESET}\n"
+mensagem2="${AMARELO}Verificando se existe um LUKS...${RESET}\n"
+
+# Função para imprimir erros no stderr
+erro() {
+    printf "${VERMELHO}%s${RESET}\n" "$*" >&2
+}
+
+# Função de verificação de disco
+verificacao() {
+    if [[ -b "$argument1" ]]; then
+        printf "${VERDE}Disco encontrado!${RESET}\n"
+        return 0
+    fi
+    erro "Disco inválido ou não encontrado: ${argument1:-<vazio>}"
+    return 1
+}
+
+# Retorna 0 se houver LUKS, 1 se não houver e 2 em caso de erro.
+verify_luks() {
+    local status
+    sudo cryptsetup isLuks "$argument1" 2>/dev/null
+    status=$?
+    case "$status" in
+        0)
+            printf "${VERDE}LUKS encontrado!${RESET}\n"
+            return 0
+            ;;
+        1)
+            printf "${AMARELO}Nenhum LUKS encontrado.${RESET}\n"
+            return 1
+            ;;
+        *)
+            erro "Não foi possível verificar se há LUKS em ${argument1}."
+            return 2
+            ;;
+    esac
+}
+
+# Desmonta todas as partições do disco e desativa swap, se houver.
+desmontar_disco() {
+    local linha caminho ponto falhou=0
+    while IFS= read -r linha; do
+        caminho=${linha%% *}
+        ponto=${linha#* }
+        # Remove espaços usados pelo lsblk para alinhar as colunas.
+        ponto="${ponto#"${ponto%%[![:space:]]*}"}"
+        ponto="${ponto%"${ponto##*[![:space:]]}"}"
+        [[ -n "$ponto" ]] || continue
+
+        if [[ "$ponto" == "[SWAP]" ]]; then
+            printf "${AMARELO}Desativando swap em %s...${RESET}\n" "$caminho"
+            sudo swapoff "$caminho" || falhou=1
+        else
+            printf "${AMARELO}Desmontando %s...${RESET}\n" "$ponto"
+            sudo umount "$ponto" || falhou=1
+        fi
+    done < <(lsblk -n -o PATH,MOUNTPOINT "$argument1" | awk 'NF > 1')
+
+    if [[ $falhou -ne 0 ]]; then
+        erro "Não foi possível desmontar todas as partições. Feche os arquivos em uso e tente novamente."
+        return 1
+    fi
+
+    if lsblk -n -o MOUNTPOINT "$argument1" | grep -q '[^[:space:]]'; then
+        erro "O disco ainda possui partições montadas. Abortando para evitar corrupção."
+        return 1
+    fi
+
+    return 0
+}
+
+# Fecha o mapper com algumas tentativas. O fechamento pode falhar
+# momentaneamente enquanto o udev/blkid ainda está inspecionando o dispositivo.
+fechar_mapper() {
+    local nome="$1" tentativa
+    for tentativa in 1 2 3 4 5; do
+        sudo cryptsetup close "$nome" 2>/dev/null
+        if [[ ! -e "/dev/mapper/$nome" ]]; then
+            return 0
+        fi
+        sleep 0.5
+    done
+    erro "Não foi possível fechar /dev/mapper/$nome. Feche manualmente: sudo cryptsetup close $nome"
+    return 1
+}
+
+# Abre o LUKS, cria um filesystem no mapper e fecha.
+# Usa $argument1 (disco) e $senha (senha já validada).
+formatar_volume_luks() {
+    local nome="$1"
+    local fs="$2"
+    local status=0
+
+    printf "${AMARELO}Abrindo /dev/mapper/%s...${RESET}\n" "$nome"
+    if ! printf '%s\n' "$senha" | sudo cryptsetup open --key-file - "$argument1" "$nome"; then
+        erro "Não foi possível abrir o LUKS para criar o filesystem."
+        return 1
+    fi
+
+    printf "${AMARELO}Criando filesystem %s em /dev/mapper/%s...${RESET}\n" "$fs" "$nome"
+    case "$fs" in
+        ext4)
+            sudo mkfs.ext4 -F "/dev/mapper/$nome" || status=1
+            ;;
+        fat32)
+            sudo mkfs.fat -F 32 "/dev/mapper/$nome" || status=1
+            ;;
+        ntfs)
+            sudo mkfs.ntfs -f -F "/dev/mapper/$nome" || status=1
+            ;;
+        *)
+            erro "Filesystem inválido: $fs"
+            status=1
+            ;;
+    esac
+    sync
+
+    if ! fechar_mapper "$nome"; then
+        status=1
+    fi
+
+    return "$status"
+}
 
 case "$FLAG" in
 
@@ -26,11 +153,14 @@ obs: O argumento pode ser tanto /dev/sdX quanto um arquivo iso
 
 Flags auxiliares:
 --help, -h     Ajuda
+--version, -v  Versão da ferramenta
 
 Flags de ação:
---boot, -b     Criar pen drive bootável
---format, -f     Formata disco
+--boot, -b       Criar pen drive bootável
+--format, -f     Formatar disco
 --clear, -c      "Zerar" o disco
+--crypt, -cr     Criptografar disco com LUKS (APAGA o conteúdo atual; opcionalmente já formata)
+--decrypt, -dr   Desbloquear disco LUKS
 
 Flag de informação do disco:
 --info, -i       Informações do disco
@@ -39,26 +169,29 @@ EOF
 
 # Opção de escrever iso em um disco (Ou mais conhecido como "Pendrive Bootável")
 --boot|-b)
-    printf "${AMARELO}Desmontando disco...${RESET}\n"
-
-    while read -r mountpoint; do
-        if [[ -n "$mountpoint" ]]; then
-            sudo umount "$mountpoint"
-        fi
-    done < <(lsblk -nr -o MOUNTPOINT "$argument1" | awk 'NF')
-
-    printf "${AMARELO}Inserindo iso no disco selecionado...${RESET}\n"
-    sudo dd if="$argument2" of="$argument1" conv=fsync bs=4M status=progress
-    sync
+printf "$mensagem1"
+sleep 1
+verificacao || exit 1
+printf "${AMARELO}Desmontando disco...${RESET}\n"
+desmontar_disco || exit 1
+printf "${AMARELO}Inserindo iso no disco selecionado...${RESET}\n"
+sudo dd if="$argument2" of="$argument1" conv=fsync bs=4M status=progress
+sync
 ;;
 
 # Opção de formatação de disco com suporte a FAT32, EXT4, NTFS
 --format|-f)
+printf "$mensagem1"
+verificacao || exit 1
 printf "${AMARELO}Iniciando formatação de disco...${RESET}\n"
 case "$argument2" in
 
 ext4)
+if [[ -n "$argument1" ]]; then
 sudo mkfs.ext4 "$argument1" # Formata disco selecionado para EXT4
+else
+printf "${VERMELHO}Disco não identificado${RESET}\n"
+fi
 ;;
 
 fat32)
@@ -73,19 +206,19 @@ sudo mkfs.ntfs "$argument1" # Formata disco para NTFS
 printf "${VERMELHO}Filesystem inválido.${RESET}\n"
 ;;
 esac
-
 ;;
 
 # Opção de "zerar" o HD, cujo a ideia é simplesmente, destruir todo o conteúdo existente no disco, podendo apagar
 # O sistema operacional, partições e até mesmo arquivos existentes presentes no disco.
 --clear|-c)
+printf "$mensagem1"
+verificacao || exit 1
 printf "${VERMELHO}AVISO URGENTE${RESET}\n"
 echo "Você tem certeza dessa decisão?"
 echo "Essa opção pode apagar o disco (Ou a partição) INTEIRO e todo o conteúdo será perdido."
 echo "Caso tenha certeza use: s ou n"
 read -p " " resp
 resp=${resp,,}
-
 if [[ "$resp" == "s" ]]; then
 printf "${AMARELO}Apagando tudo do disco selecionado...${RESET}\n"
 sudo dd if=/dev/zero of="$argument1" bs=4M status=progress conv=fsync
@@ -97,6 +230,8 @@ fi
 
 # Opção de exibir informações do disco
 --info|-i)
+printf "$mensagem1"
+verificacao || exit 1
 printf "${AMARELO}Coletando informações sobre o disco selecionado...${RESET}\n"
 sleep 1
 # Variáveis para a coleta de informações do disco
@@ -119,6 +254,149 @@ echo "====================================================================="
 echo "Assintura: $signature"
 echo "Modelo: $model"
 echo "Fabricante: $fabricante"
+;;
+--version|-v)
+echo "D-Disker - Um canívete suíço de manipulação de disco"
+echo "Versão 2.2"
+;;
+
+--crypt|-cr)
+printf "$mensagem1"
+verificacao || exit 1
+
+printf "$mensagem2"
+verify_luks
+luks_status=$?
+if [[ $luks_status -eq 0 ]]; then
+    erro "Este disco já possui um cabeçalho LUKS. Abortando para não sobrescrever os dados existentes."
+    exit 1
+elif [[ $luks_status -ne 1 ]]; then
+    exit 1
+fi
+
+if lsblk -nr -o FSTYPE "$argument1" | grep -qx 'crypto_LUKS'; then
+    erro "Há uma partição LUKS dentro de $argument1. Use a partição específica (ex.: /dev/sdb1) ou faça backup antes."
+    exit 1
+fi
+
+printf "${VERMELHO}ATENÇÃO: esta operação NÃO criptografa os dados existentes. Ela cria um novo cabeçalho LUKS e APAGA todo o conteúdo atual do disco.${RESET}\n"
+lsblk -o NAME,SIZE,FSTYPE,MOUNTPOINT "$argument1"
+echo "Se você tem dados importantes nesse disco, cancele agora e faça backup."
+read -r -p "Digite 's' para continuar ou qualquer outra tecla para cancelar: " resp2
+if [[ "${resp2,,}" != "s" ]]; then
+    echo "Operação cancelada. Nada foi alterado."
+    exit 0
+fi
+
+desmontar_disco || exit 1
+
+echo "Aviso: anote a senha em um local seguro. Sem ela, os dados serão irrecuperáveis."
+read -r -s -p "Coloque uma senha: " senha
+echo
+read -r -s -p "Repita a senha: " senha_conf
+echo
+if [[ -z "$senha" ]]; then
+    erro "A senha não pode ser vazia. Nada foi alterado."
+    exit 1
+fi
+if [[ "$senha" != "$senha_conf" ]]; then
+    erro "As senhas não conferem. Nada foi alterado."
+    exit 1
+fi
+
+printf "${AMARELO}Criptografando %s...${RESET}\n" "$argument1"
+if printf '%s\n' "$senha" | sudo cryptsetup luksFormat --batch-mode --key-file - "$argument1"; then
+    if sudo cryptsetup isLuks "$argument1" 2>/dev/null; then
+        printf "${VERDE}Disco criptografado com sucesso!${RESET}\n"
+        status_formatacao=0
+
+        read -r -p "Deseja já criar um filesystem dentro do LUKS? [s/N] " formatar
+        if [[ "${formatar,,}" == "s" ]]; then
+            read -r -p "Nome do dispositivo mapeado (ex.: meu_disco): " nome_mapper
+            if [[ ! "$nome_mapper" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*$ ]]; then
+                erro "Nome inválido. Use letras, números, ponto, hífen e sublinhado; não comece com ponto ou hífen."
+                status_formatacao=1
+            elif [[ -e "/dev/mapper/$nome_mapper" ]]; then
+                erro "Já existe /dev/mapper/$nome_mapper. Feche-o ou escolha outro nome."
+                status_formatacao=1
+            else
+                read -r -p "Filesystem [ext4/fat32/ntfs] (padrão: ext4): " fs_luks
+                fs_luks=${fs_luks,,}
+                [[ -n "$fs_luks" ]] || fs_luks=ext4
+                case "$fs_luks" in
+                    ext4|fat32|ntfs) ;;
+                    *)
+                        erro "Filesystem inválido. Usando ext4."
+                        fs_luks=ext4
+                        ;;
+                esac
+
+                if formatar_volume_luks "$nome_mapper" "$fs_luks"; then
+                    printf "${VERDE}Filesystem %s criado dentro do LUKS.${RESET}\n" "$fs_luks"
+                    echo "Para usar: ./d-disk --decrypt $argument1 $nome_mapper"
+                    echo "Depois: sudo mount /dev/mapper/$nome_mapper /mnt"
+                else
+                    erro "O LUKS foi criado, mas a criação do filesystem falhou."
+                    status_formatacao=1
+                fi
+            fi
+
+            if [[ $status_formatacao -ne 0 ]]; then
+                echo "O disco continua criptografado. Para terminar manualmente:"
+                echo "  ./d-disk --decrypt $argument1 <nome>"
+                echo "  sudo mkfs.ext4 /dev/mapper/<nome>"
+            fi
+        else
+            echo "Próximo passo: desbloqueie com 'd-disk --decrypt $argument1 <nome>'."
+            echo "Na primeira vez, crie um filesystem dentro do mapper: sudo mkfs.ext4 /dev/mapper/<nome>"
+        fi
+
+        unset senha senha_conf
+        exit "$status_formatacao"
+    else
+        erro "O cryptsetup retornou sucesso, mas o cabeçalho LUKS não foi encontrado. Verifique o disco."
+        exit 1
+    fi
+else
+    erro "Falha ao criptografar o disco. Nada foi declarado como sucesso; verifique a mensagem acima."
+    exit 1
+fi
+;;
+
+--decrypt|-dr)
+printf "$mensagem1"
+verificacao || exit 1
+
+if [[ -z "$argument2" ]]; then
+    erro "Informe o nome do dispositivo mapeado. Exemplo: d-disk --decrypt /dev/sdb meu_disco"
+    exit 1
+fi
+if [[ -e "/dev/mapper/$argument2" ]]; then
+    erro "Já existe /dev/mapper/$argument2. Feche-o com 'sudo cryptsetup close $argument2' ou escolha outro nome."
+    exit 1
+fi
+
+printf "$mensagem2"
+verify_luks
+luks_status=$?
+if [[ $luks_status -eq 1 ]]; then
+    erro "Nenhum LUKS encontrado em $argument1. Nada foi aberto."
+    exit 1
+elif [[ $luks_status -ne 0 ]]; then
+    exit 1
+fi
+
+read -r -s -p "Coloque a senha: " senha2
+echo
+printf "${AMARELO}Desbloqueando %s em /dev/mapper/%s...${RESET}\n" "$argument1" "$argument2"
+if printf '%s\n' "$senha2" | sudo cryptsetup open --key-file - "$argument1" "$argument2"; then
+    printf "${VERDE}Disco desbloqueado com sucesso em /dev/mapper/%s!${RESET}\n" "$argument2"
+    echo "Acesse com: sudo mount /dev/mapper/$argument2 /mnt"
+    echo "Feche com: sudo cryptsetup close $argument2"
+else
+    erro "Falha ao desbloquear o disco. Verifique a senha e a mensagem acima."
+    exit 1
+fi
 ;;
 
 *)

@@ -9,6 +9,7 @@ D-Disker é um canivete suíço para manipulação de disco, utilizando comandos
 * Inserir imagens ISO diretamente em discos (Usando dd);
 * Formatar filesystem de discos (Sendo os mais comuns: FAT32, NTFS ou EXT4);
 * Limpar disco completamente (Apagar completamente tudo, sistema operacional, arquivos, tudo, "zerando" o disco inteiro;
+* Criptografar e desbloquear discos com LUKS (usando `cryptsetup`);
 * Mostrar informações de um disco;
 
 ## Qual o objetivo do D-Disker?
@@ -24,6 +25,7 @@ Facilitar a manipulação de disco, sem precisar usar comandos muito extensos ou
 * ```dd``` --> Utilizado para inserir arquivos ISO nos discos diretamente e usado para "zerar" o disco.
 * ```mkfs``` --> Usado para formatar arquivos de filesystem.
 * ```lsblk```, ```wipefs``` e ```df``` --> Usados na coleta de informações do disco.
+* ```cryptsetup``` --> Usado para criptografar (LUKS) e desbloquear discos.
 
 ## Sintaxe do comando
 
@@ -44,6 +46,8 @@ use ```--boot``` ou ```-b``` nas flags) ou o próprio filesystem (Caso você use
 | `d-disk --format` ou `d-disk -f` | Formatar filesystem do disco (Podendo ser EXT4, FAT32 ou NTFS) |
 | `d-disk --info` ou `d-disk -i` | Informações sobre o disco | 
 | `d-disk --clear` ou `d-disk -c` | "Zerar" o HD |
+| `d-disk --crypt` ou `d-disk -cr` | Criptografar o disco com LUKS (apaga o conteúdo atual) |
+| `d-disk --decrypt` ou `d-disk -dr` | Desbloquear um disco LUKS em `/dev/mapper/<nome>` |
 
 ## Exemplos de comandos
 
@@ -110,6 +114,36 @@ ou
 ```bash
 d-disk -i /dev/sdX
 ```
+Caso queira criptografar um disco com LUKS, exemplo:
+
+```bash
+d-disk --crypt /dev/sdX
+```
+
+> **Atenção:** essa opção cria um novo cabeçalho LUKS e apaga todo o conteúdo atual do disco. Não é criptografia "no lugar" (in-place). Faça backup antes.
+
+Ao terminar, o D-Disker pergunta se você quer criar um filesystem dentro do LUKS. Se aceitar, ele pede o nome do mapper (ex.: `meu_disco`) e o tipo de filesystem (`ext4`, `fat32` ou `ntfs`, com `ext4` como padrão), abre o volume, formata e fecha novamente.
+
+Caso queira desbloquear o disco criptografado, exemplo:
+
+```bash
+d-disk --decrypt /dev/sdX meu_disco
+```
+
+Na primeira vez, o volume desbloqueado ainda não tem um sistema de arquivos. Crie um (isso apaga o conteúdo do mapper, que acabou de ser criado):
+
+```bash
+sudo mkfs.ext4 /dev/mapper/meu_disco
+sudo mount /dev/mapper/meu_disco /mnt
+```
+
+Para fechar depois de usar:
+
+```bash
+sudo umount /mnt
+sudo cryptsetup close meu_disco
+```
+
 ## Como instalar o D-Disker
 
 ```bash
