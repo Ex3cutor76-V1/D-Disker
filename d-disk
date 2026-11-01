@@ -154,11 +154,16 @@ obs: O argumento pode ser tanto /dev/sdX quanto um arquivo iso
 Flags auxiliares:
 --help, -h     Ajuda
 --version, -v  Versão da ferramenta
+--upgrade, -up Atualiza a ferramenta D-Disker
 
-Flags de ação:
+Flags de gravar Imagens ISO:
 --boot, -b       Criar pen drive bootável
+
+Flags de formatação e limpeza de disco:
 --format, -f     Formatar disco
 --clear, -c      "Zerar" o disco
+
+Flags de criptografia
 --crypt, -cr     Criptografar disco com LUKS (APAGA o conteúdo atual; opcionalmente já formata)
 --decrypt, -dr   Desbloquear disco LUKS
 
@@ -239,14 +244,14 @@ capacidade=$(lsblk -dn -o SIZE "$argument1")
 filesys=$(lsblk -n -o FSTYPE "$argument1" | awk 'NF {print; exit}')
 particao=$(lsblk -o NAME,SIZE,FSTYPE,MOUNTPOINT "$argument1")
 signature=$(sudo wipefs "$argument1" | awk 'NR > 1 {print $3}')
-open_espace=$(df -h "$argument1" | awk 'NR==2 {print $4}')
+DISK=$(df -h / | awk 'NR==2 {print $3 " / " $2 " (" $5 ")"}')
 model=$(lsblk -o MODEL "$argument1" | awk 'NF && $0 != "MODEL"')
 fabricante=$(lsblk -o VENDOR "$argument1" | awk 'NR > 1 && NF')
 
 # Exibindo informações na tela
 echo "Disco escolhido: $argument1"
 echo "Capacidade de armazenamento: $capacidade "
-echo "Espaço livre: $open_espace"
+echo "Espaço livre: $DISK"
 echo "Formatação de filesystem: $filesys"
 echo "================================PARTIÇÕES============================"
 echo "$particao"
@@ -257,7 +262,7 @@ echo "Fabricante: $fabricante"
 ;;
 --version|-v)
 echo "D-Disker - Um canívete suíço de manipulação de disco"
-echo "Versão 2.2"
+echo "Versão 3.0"
 ;;
 
 --crypt|-cr)
@@ -397,6 +402,14 @@ else
     erro "Falha ao desbloquear o disco. Verifique a senha e a mensagem acima."
     exit 1
 fi
+;;
+
+-up|--upgrade)
+printf "${AMARELO}Atualizando D-Disker...${RESET}\n"
+git clone https://github.com/Ex3cutor76-V1/D-Disker.git
+cd D-Disker/
+sudo ./install.sh
+printf "${VERDE}Atualização completa!${RESET}\n"
 ;;
 
 *)

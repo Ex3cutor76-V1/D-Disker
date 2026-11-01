@@ -48,6 +48,7 @@ use ```--boot``` ou ```-b``` nas flags) ou o próprio filesystem (Caso você use
 | `d-disk --clear` ou `d-disk -c` | "Zerar" o HD |
 | `d-disk --crypt` ou `d-disk -cr` | Criptografar o disco com LUKS (apaga o conteúdo atual) |
 | `d-disk --decrypt` ou `d-disk -dr` | Desbloquear um disco LUKS em `/dev/mapper/<nome>` |
+| `d-disk --upgrade` ou `d-disk -up` | Atualiza a ferramenta D-Disker | 
 
 ## Exemplos de comandos
 
