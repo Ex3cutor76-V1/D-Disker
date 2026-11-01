@@ -244,7 +244,7 @@ capacidade=$(lsblk -dn -o SIZE "$argument1")
 filesys=$(lsblk -n -o FSTYPE "$argument1" | awk 'NF {print; exit}')
 particao=$(lsblk -o NAME,SIZE,FSTYPE,MOUNTPOINT "$argument1")
 signature=$(sudo wipefs "$argument1" | awk 'NR > 1 {print $3}')
-DISK=$(df -h / | awk 'NR==2 {print $3 " / " $2 " (" $5 ")"}')
+DISK=$(df -h "$argumento1" | awk 'NR==2 {print $3 " / " $2 " (" $5 ")"}')
 model=$(lsblk -o MODEL "$argument1" | awk 'NF && $0 != "MODEL"')
 fabricante=$(lsblk -o VENDOR "$argument1" | awk 'NR > 1 && NF')
 
@@ -406,6 +406,7 @@ fi
 
 -up|--upgrade)
 printf "${AMARELO}Atualizando D-Disker...${RESET}\n"
+sudo rm -f /usr/local/bin/d-disk
 git clone https://github.com/Ex3cutor76-V1/D-Disker.git
 cd D-Disker/
 sudo ./install.sh
