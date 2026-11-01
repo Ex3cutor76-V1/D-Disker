@@ -235,34 +235,248 @@ fi
 
 # Opção de exibir informações do disco
 --info|-i)
-printf "$mensagem1"
+printf '%b' "$mensagem1"
 verificacao || exit 1
 printf "${AMARELO}Coletando informações sobre o disco selecionado...${RESET}\n"
-sleep 1
-# Variáveis para a coleta de informações do disco
-capacidade=$(lsblk -dn -o SIZE "$argument1")
-filesys=$(lsblk -n -o FSTYPE "$argument1" | awk 'NF {print; exit}')
-particao=$(lsblk -o NAME,SIZE,FSTYPE,MOUNTPOINT "$argument1")
-signature=$(sudo wipefs "$argument1" | awk 'NR > 1 {print $3}')
-DISK=$(df -h "$argumento1" | awk 'NR==2 {print $3 " / " $2 " (" $5 ")"}')
-model=$(lsblk -o MODEL "$argument1" | awk 'NF && $0 != "MODEL"')
-fabricante=$(lsblk -o VENDOR "$argument1" | awk 'NR > 1 && NF')
 
-# Exibindo informações na tela
+# ------------------------------------------------------------------
+# Auxiliares exclusivos do --info
+# ------------------------------------------------------------------
+
+# Converte um valor em bytes para unidade legível. Sem número: "indisponível".
+humanizar_bytes() {
+    local bytes="$1"
+    if [[ ! "$bytes" =~ ^[0-9]+$ ]]; then
+        printf 'indisponível'
+        return
+    fi
+    awk -v b="$bytes" 'BEGIN {
+        split("B KB MB GB TB PB EB", u, " ")
+        i = 1; v = b
+        while (v >= 1024 && i < 7) { v = v / 1024; i++ }
+        if (i == 1) printf "%d %s", v, u[i]
+        else        printf "%.1f %s", v, u[i]
+    }'
+}
+
+# Monta $1 somente leitura em diretório temporário.
+# Sucesso: imprime o ponto de montagem e retorna 0. Falha: retorna 1, sem sujeira.
+montar_temporario_ro() {
+    local dev="$1" fs="$2" dir opts
+    dir=$(mktemp -d "${TMPDIR:-/tmp}/d-disk-info.XXXXXX" 2>/dev/null) || return 1
+    opts="ro,noatime"
+    # noload impede que o kernel reproduza o journal do ext2/3/4 na montagem.
+    case "$fs" in
+        ext2|ext3|ext4) opts="ro,noload,noatime" ;;
+    esac
+    if [[ -t 0 ]]; then
+        sudo mount -o "$opts" "$dev" "$dir" 2>/dev/null
+    else
+        # Sem terminal: não bloqueia esperando senha.
+        sudo -n mount -o "$opts" "$dev" "$dir" 2>/dev/null
+    fi
+    if [[ $? -ne 0 ]]; then
+        rmdir "$dir" 2>/dev/null
+        return 1
+    fi
+    printf '%s' "$dir"
+}
+
+# Lê uma coluna de texto do lsblk sem escapes (raw escapa "USB\x20DISK") e sem
+# espaços de alinhamento nas pontas.
+campo_texto() {
+    local coluna="$1" alvo="$2" valor
+    valor=$(lsblk -dn -o "$coluna" "$alvo" 2>/dev/null | head -n 1)
+    valor="${valor#"${valor%%[![:space:]]*}"}"
+    valor="${valor%"${valor##*[![:space:]]}"}"
+    valor="${valor//\\x20/ }"
+    printf '%s' "$valor"
+}
+
+# Lê uma propriedade do udev (de PROPS_UDEV), decodifica \xHH e apara espaços.
+campo_udev() {
+    local chave="$1" valor
+    valor=$(sed -n "s/^${chave}=//p" <<< "$PROPS_UDEV" | head -n 1)
+    valor=$(printf '%b' "$valor" 2>/dev/null)
+    valor="${valor#"${valor%%[![:space:]]*}"}"
+    valor="${valor%"${valor##*[![:space:]]}"}"
+    printf '%s' "$valor"
+}
+
+# Lê o espaço do ponto de montagem $1 e preenche TAM_* / USADO_* / LIVRE_* / PCT_USO.
+ler_espaco() {
+    local mp="$1" linha
+    TAM_BYTES=""; USADO_BYTES=""; LIVRE_BYTES=""; PCT_USO=""
+    linha=$(df -B1 --output=size,used,avail,pcent "$mp" 2>/dev/null | tail -n 1) || return 1
+    read -r TAM_BYTES USADO_BYTES LIVRE_BYTES PCT_USO <<< "$linha"
+    [[ -n "$TAM_BYTES" && -n "$LIVRE_BYTES" ]]
+}
+
+# ------------------------------------------------------------------
+# Identificação do dispositivo
+# ------------------------------------------------------------------
+
+tipo=$(lsblk -dnro TYPE "$argument1" 2>/dev/null)
+
+# Disco "físico" correspondente (necessário quando o alvo é uma partição).
+if [[ "$tipo" == "disk" ]]; then
+    disco="$argument1"
+else
+    pkname=$(lsblk -nro PKNAME "$argument1" 2>/dev/null)
+    if [[ -n "$pkname" ]]; then
+        disco="/dev/$pkname"
+    else
+        disco="$argument1"
+    fi
+fi
+
+capacidade=$(lsblk -bdnro SIZE "$argument1" 2>/dev/null)
+pttype=$(lsblk -dnro PTTYPE "$disco" 2>/dev/null)
+modelo=$(campo_texto MODEL "$disco")
+fabricante=$(campo_texto VENDOR "$disco")
+serie=$(campo_texto SERIAL "$disco")
+removivel=$(lsblk -dnro RM "$disco" 2>/dev/null)
+transporte=$(lsblk -dnro TRAN "$disco" 2>/dev/null)
+
+# Pendrives baratos não expõem VENDOR: cai para as propriedades do udev.
+if [[ -z "$fabricante" || -z "$modelo" || -z "$serie" ]]; then
+    PROPS_UDEV=$(udevadm info --query=property --name="$disco" 2>/dev/null)
+    [[ -z "$fabricante" ]] && fabricante=$(campo_udev ID_VENDOR_FROM_DATABASE)
+    [[ -z "$fabricante" ]] && fabricante=$(campo_udev ID_VENDOR)
+    [[ -z "$fabricante" ]] && fabricante=$(campo_udev ID_VENDOR_ENC)
+    if [[ -z "$fabricante" ]]; then
+        id_fornecedor=$(campo_udev ID_VENDOR_ID)
+        [[ -n "$id_fornecedor" ]] && fabricante="desconhecido (ID de fornecedor $id_fornecedor)"
+    fi
+    [[ -z "$modelo" ]] && modelo=$(campo_udev ID_MODEL_FROM_DATABASE)
+    [[ -z "$modelo" ]] && modelo=$(campo_udev ID_MODEL)
+    [[ -z "$modelo" ]] && modelo=$(campo_udev ID_MODEL_ENC)
+    [[ -z "$serie" ]] && serie=$(campo_udev ID_SERIAL_SHORT)
+fi
+
+descricao_tipo="disco"
+case "$tipo" in
+    part) descricao_tipo="partição" ;;
+    rom)  descricao_tipo="unidade óptica" ;;
+    loop) descricao_tipo="dispositivo loop" ;;
+esac
+[[ "$removivel" == "1" ]] && descricao_tipo="$descricao_tipo removível"
+[[ -n "$transporte" ]] && descricao_tipo="$descricao_tipo (transporte: $transporte)"
+
+# Aviso: alvo pertence ao disco que hospeda o sistema em execução.
+fonte_raiz=$(findmnt -nro SOURCE / 2>/dev/null)
+if [[ -n "$fonte_raiz" ]]; then
+    pkname_raiz=$(lsblk -nro PKNAME "$fonte_raiz" 2>/dev/null)
+    if [[ -n "$pkname_raiz" && "$disco" == "/dev/$pkname_raiz" ]]; then
+        erro "Aviso: $argument1 pertence ao disco do sistema em execução (/dev/$pkname_raiz). Não use --clear, --format ou --crypt neste disco."
+    fi
+fi
+
+# ------------------------------------------------------------------
+# Exibição
+# ------------------------------------------------------------------
+
 echo "Disco escolhido: $argument1"
-echo "Capacidade de armazenamento: $capacidade "
-echo "Espaço livre: $DISK"
-echo "Formatação de filesystem: $filesys"
+[[ "$tipo" == "part" ]] && echo "Disco físico correspondente: $disco"
+echo "Tipo de dispositivo: $descricao_tipo"
+if [[ -n "$capacidade" ]]; then
+    echo "Capacidade de armazenamento: $(humanizar_bytes "$capacidade") ($capacidade bytes)"
+else
+    echo "Capacidade de armazenamento: indisponível"
+fi
+echo "Modelo: ${modelo:-indisponível}"
+echo "Fabricante: ${fabricante:-indisponível}"
+echo "Número de série: ${serie:-indisponível}"
+echo "Tabela de partições: ${pttype:-nenhuma}"
 echo "================================PARTIÇÕES============================"
-echo "$particao"
+lsblk -o NAME,SIZE,FSTYPE,LABEL,MOUNTPOINT "$argument1"
 echo "====================================================================="
-echo "Assintura: $signature"
-echo "Modelo: $model"
-echo "Fabricante: $fabricante"
+
+# Espaço livre por volume. Um disco inteiro não tem "espaço livre":
+# isso pertence ao filesystem de cada partição, e exige a partição montada.
+echo "Espaço livre por volume:"
+
+mapfile -t volumes < <(lsblk -lnpo NAME,TYPE "$argument1" 2>/dev/null | awk '$2 == "part" {print $1}')
+# Disco sem tabela de partições (filesystem direto no dispositivo).
+[[ ${#volumes[@]} -eq 0 ]] && volumes=("$argument1")
+
+soma_livre=0
+soma_total=0
+verificados=0
+
+for vol in "${volumes[@]}"; do
+    fsvol=$(lsblk -dnro FSTYPE "$vol" 2>/dev/null)
+    rotulo=$(campo_texto LABEL "$vol")
+    etiqueta="${fsvol:-sem filesystem}"
+    [[ -n "$rotulo" ]] && etiqueta="$etiqueta \"$rotulo\""
+
+    if [[ "$fsvol" == "swap" ]]; then
+        printf '  %s  (%s)  [SWAP]: espaço livre não se aplica\n' "$vol" "$etiqueta"
+        continue
+    fi
+
+    if [[ "$fsvol" == "crypto_LUKS" ]]; then
+        printf '  %s  (%s)  criptografado: use "d-disk --decrypt %s <nome>" para medir o conteúdo\n' \
+            "$vol" "$etiqueta" "$vol"
+        continue
+    fi
+
+    ponto=$(findmnt -rn -S "$vol" -o TARGET 2>/dev/null | head -n 1)
+    temporario=""
+    if [[ -z "$ponto" ]]; then
+        ponto=$(montar_temporario_ro "$vol" "$fsvol")
+        temporario="$ponto"
+    fi
+
+    if [[ -n "$ponto" ]] && ler_espaco "$ponto"; then
+        pct_num="${PCT_USO%\%}"
+        if [[ -n "$temporario" ]]; then
+            origem="montado temporariamente somente leitura"
+        else
+            origem="montado em $ponto"
+        fi
+        printf '  %s  (%s)  %s\n' "$vol" "$etiqueta" "$origem"
+        printf '      %s livres de %s (%s%% usado, %s bytes livres)\n' \
+            "$(humanizar_bytes "$LIVRE_BYTES")" \
+            "$(humanizar_bytes "$TAM_BYTES")" \
+            "${pct_num:-?}" \
+            "$LIVRE_BYTES"
+        soma_livre=$((soma_livre + LIVRE_BYTES))
+        soma_total=$((soma_total + TAM_BYTES))
+        verificados=$((verificados + 1))
+    elif [[ -n "$ponto" ]]; then
+        printf '  %s  (%s)  espaço livre indisponível (df falhou em %s)\n' "$vol" "$etiqueta" "$ponto"
+    else
+        printf '  %s  (%s)  não montado: espaço livre indisponível\n' "$vol" "$etiqueta"
+        printf '      dica: sudo mount -o ro %s /mnt   ou   udisksctl mount -b %s\n' "$vol" "$vol"
+    fi
+
+    # Solta a montagem temporária antes de seguir.
+    if [[ -n "$temporario" ]]; then
+        sudo umount "$temporario" 2>/dev/null
+        rmdir "$temporario" 2>/dev/null
+    fi
+done
+
+echo "---------------------------------------------------------------------"
+if [[ $verificados -gt 0 ]]; then
+    echo "Total livre nas partições verificadas: $(humanizar_bytes "$soma_livre") de $(humanizar_bytes "$soma_total")"
+else
+    echo "Total livre: indisponível (nenhuma partição pôde ser lida)"
+fi
+
+# Espaço do disco que não pertence a nenhuma partição.
+# Só faz sentido com tabela de partições (zram/loop/rom não têm "não alocado").
+if [[ "$tipo" == "disk" && -n "$pttype" && "$capacidade" =~ ^[0-9]+$ ]]; then
+    soma_particoes=$(lsblk -bno SIZE,TYPE "$argument1" 2>/dev/null | awk '$2 == "part" {s += $1} END {print s + 0}')
+    nao_alocado=$((capacidade - soma_particoes))
+    [[ $nao_alocado -lt 0 ]] && nao_alocado=0
+    echo "Espaço não alocado (sem partição): $(humanizar_bytes "$nao_alocado")"
+fi
 ;;
 --version|-v)
 echo "D-Disker - Um canívete suíço de manipulação de disco"
-echo "Versão 3.0"
+echo "Versão 3.2"
 ;;
 
 --crypt|-cr)
@@ -410,6 +624,8 @@ sudo rm -f /usr/local/bin/d-disk
 git clone https://github.com/Ex3cutor76-V1/D-Disker.git
 cd D-Disker/
 sudo ./install.sh
+cd ..
+rm -rf D-Disker/
 printf "${VERDE}Atualização completa!${RESET}\n"
 ;;
 
