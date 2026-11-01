@@ -11,6 +11,7 @@ D-Disker é um canivete suíço para manipulação de disco, utilizando comandos
 * Limpar disco completamente (Apagar completamente tudo, sistema operacional, arquivos, tudo, "zerando" o disco inteiro;
 * Criptografar e desbloquear discos com LUKS (usando `cryptsetup`);
 * Mostrar informações de um disco;
+* Atualizar a si mesmo;
 
 ## Qual o objetivo do D-Disker?
 
